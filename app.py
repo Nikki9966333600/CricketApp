@@ -73,6 +73,10 @@ def init_session_state():
         'batsmen_stats': {},  # {player_name: {runs, balls, fours, sixes, out}}
         'next_batsman_index': 0,
         'awaiting_new_batsman': False,
+        'current_bowler': None,
+        'bowlers_stats': {},  # {bowler_name: {balls, runs, wickets, maidens, overs_bowled}}
+        'awaiting_new_bowler': False,
+        'over_runs': 0,  # Track runs in current over for maiden detection
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -131,6 +135,22 @@ def init_batsman_stats(player_name):
             'on_field': True,
         }
 
+def get_bowling_team_players():
+    """Get the list of players from the currently bowling team"""
+    if st.session_state.bowling_team == st.session_state.team1_name:
+        return st.session_state.team1_players
+    return st.session_state.team2_players
+
+
+def init_bowler_stats(player_name):
+    """Initialize stats for a bowler"""
+    if player_name not in st.session_state.bowlers_stats:
+        st.session_state.bowlers_stats[player_name] = {
+            'balls': 0,
+            'runs': 0,
+            'wickets': 0,
+            'maidens': 0,
+        }
 
 def add_ball(runs_scored, is_wicket=False, extra_type=None):
     """Add a ball to the game"""
@@ -140,7 +160,23 @@ def add_ball(runs_scored, is_wicket=False, extra_type=None):
         'wicket': is_wicket,
         'extra': extra_type,
         'striker': st.session_state.striker,
+        'bowler': st.session_state.current_bowler,
     }
+
+    # Update bowler stats
+    bowler = st.session_state.current_bowler
+    if bowler and bowler in st.session_state.bowlers_stats:
+        # Bowler gets credit/blame for runs (wides and no-balls count as bowler's runs)
+        st.session_state.bowlers_stats[bowler]['runs'] += runs_scored
+        # Wides and no-balls don't count as a legal ball bowled
+        if extra_type not in ['Wide', 'No Ball']:
+            st.session_state.bowlers_stats[bowler]['balls'] += 1
+            st.session_state.over_runs += runs_scored
+        else:
+            st.session_state.over_runs += runs_scored
+        # Bowler gets wicket credit (except for run outs - we treat all as bowler's wicket for simplicity)
+        if is_wicket:
+            st.session_state.bowlers_stats[bowler]['wickets'] += 1
 
     st.session_state.runs += runs_scored
 
@@ -181,12 +217,22 @@ def add_ball(runs_scored, is_wicket=False, extra_type=None):
             st.session_state.non_striker, st.session_state.striker
         )
 
-    # End of over - rotate strike
+    # End of over - rotate strike and check for maiden + new bowler
     if st.session_state.balls > 0 and st.session_state.balls % 6 == 0 and extra_type not in ['Wide', 'No Ball']:
+        # Check for maiden over (0 runs in the over)
+        if st.session_state.over_runs == 0 and bowler:
+            st.session_state.bowlers_stats[bowler]['maidens'] += 1
+        # Reset over runs counter
+        st.session_state.over_runs = 0
+        # Rotate strike
         if not st.session_state.awaiting_new_batsman:
             st.session_state.striker, st.session_state.non_striker = (
                 st.session_state.non_striker, st.session_state.striker
             )
+        # Prompt for new bowler (a bowler can't bowl consecutive overs)
+        max_balls = st.session_state.total_overs * 6
+        if st.session_state.balls < max_balls:
+            st.session_state.awaiting_new_bowler = True
 
     st.session_state.ball_history.append(ball_data)
 
@@ -414,11 +460,20 @@ elif st.session_state.setup_step == 'opening':
             index=0
         )
 
+    bowling_players = get_bowling_team_players()
+    opening_bowler = st.selectbox(
+        "⚾ Opening Bowler",
+        bowling_players,
+        index=0
+    )
+
     if st.button("🚀 Start Match!", type="primary"):
         st.session_state.striker = striker
         st.session_state.non_striker = non_striker
+        st.session_state.current_bowler = opening_bowler
         init_batsman_stats(striker)
         init_batsman_stats(non_striker)
+        init_bowler_stats(opening_bowler)
         # Set next batsman index
         st.session_state.next_batsman_index = 2
         st.session_state.setup_step = 'playing'
@@ -533,6 +588,35 @@ elif st.session_state.setup_step == 'playing':
 
     st.markdown("---")
 
+    # ===== CURRENT BOWLER =====
+    st.subheader("⚾ Current Bowler")
+
+    if st.session_state.awaiting_new_bowler:
+        st.warning("⚠️ End of over! Select the next bowler.")
+        bowling_players = get_bowling_team_players()
+        # Can't bowl consecutive overs
+        available_bowlers = [p for p in bowling_players if p != st.session_state.current_bowler]
+        new_bowler = st.selectbox("Select next bowler:", available_bowlers, key="new_bowler_select")
+        if st.button("✅ Confirm New Bowler", type="primary"):
+            st.session_state.current_bowler = new_bowler
+            init_bowler_stats(new_bowler)
+            st.session_state.awaiting_new_bowler = False
+            st.rerun()
+    else:
+        bowler = st.session_state.current_bowler
+        b_stats = st.session_state.bowlers_stats.get(bowler, {})
+        overs_bowled = f"{b_stats.get('balls', 0) // 6}.{b_stats.get('balls', 0) % 6}"
+        econ = round((b_stats.get('runs', 0) / (b_stats.get('balls', 0) / 6)), 2) if b_stats.get('balls', 0) > 0 else 0.0
+        st.info(
+            f"**⚾ {bowler}** | Overs: **{overs_bowled}** | "
+            f"Runs: **{b_stats.get('runs', 0)}** | "
+            f"Wickets: **{b_stats.get('wickets', 0)}** | "
+            f"Maidens: **{b_stats.get('maidens', 0)}** | "
+            f"Econ: **{econ}**"
+        )
+
+    st.markdown("---")
+
     # ===== BATSMEN ON FIELD =====
     st.subheader("🏏 Batsmen on Field")
 
@@ -591,8 +675,8 @@ elif st.session_state.setup_step == 'playing':
 
     st.markdown("---")
 
-    # Scoring buttons (only show if not awaiting new batsman)
-    if not st.session_state.awaiting_new_batsman:
+    # Scoring buttons (only show if not awaiting new batsman or new bowler)
+    if not st.session_state.awaiting_new_batsman and not st.session_state.awaiting_new_bowler:
         st.subheader("📝 Add Score")
 
         st.markdown("**Runs Scored:**")
@@ -644,10 +728,29 @@ elif st.session_state.setup_step == 'playing':
             if st.button("🛑 End Match"):
                 end_match()
                 st.rerun()
+    # ===== BOWLING SCORECARD =====
+    st.subheader("⚾ Bowling Figures")
+    if st.session_state.bowlers_stats:
+        bowling_data = []
+        for name, stats in st.session_state.bowlers_stats.items():
+            overs_str = f"{stats['balls'] // 6}.{stats['balls'] % 6}"
+            econ = round((stats['runs'] / (stats['balls'] / 6)), 2) if stats['balls'] > 0 else 0.0
+            bowling_data.append({
+                'Bowler': name,
+                'Overs': overs_str,
+                'Runs': stats['runs'],
+                'Wickets': stats['wickets'],
+                'Maidens': stats['maidens'],
+                'Econ': econ,
+            })
+        st.dataframe(bowling_data, use_container_width=True, hide_index=True)
+    else:
+        st.info("No bowling stats yet")
 
     # ===== SCORECARD =====
     st.markdown("---")
     st.subheader("📊 Batting Scorecard")
+
 
     if st.session_state.batsmen_stats:
         scorecard_data = []
