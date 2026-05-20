@@ -294,7 +294,9 @@ def end_innings():
             'wickets': st.session_state.wickets,
             'overs': calculate_overs(st.session_state.balls),
             'team': st.session_state.batting_team,
+            'bowling_team': st.session_state.bowling_team,
             'batsmen_stats': dict(st.session_state.batsmen_stats),
+            'bowlers_stats': dict(st.session_state.bowlers_stats),
         }
         st.session_state.target = st.session_state.runs + 1
         # Switch teams
@@ -313,6 +315,10 @@ def end_innings():
         st.session_state.ball_history = []
         st.session_state.innings = 2
         st.session_state.batsmen_stats = {}
+        st.session_state.bowlers_stats = {}
+        st.session_state.current_bowler = None
+        st.session_state.awaiting_new_bowler = False
+        st.session_state.over_runs = 0
         st.session_state.striker = None
         st.session_state.non_striker = None
         st.session_state.next_batsman_index = 0
@@ -329,7 +335,9 @@ def end_match():
         'wickets': st.session_state.wickets,
         'overs': calculate_overs(st.session_state.balls),
         'team': st.session_state.batting_team,
+        'bowling_team': st.session_state.bowling_team,
         'batsmen_stats': dict(st.session_state.batsmen_stats),
+        'bowlers_stats': dict(st.session_state.bowlers_stats),
     }
     st.session_state.match_complete = True
 
@@ -516,6 +524,9 @@ elif st.session_state.match_complete:
 
     for innings_score in [t1, t2]:
         st.markdown(f"### {innings_score['team']} - {innings_score['runs']}/{innings_score['wickets']} ({innings_score['overs']} overs)")
+
+        # Batting scorecard
+        st.markdown("**🏏 Batting**")
         if innings_score.get('batsmen_stats'):
             data = []
             for name, stats in innings_score['batsmen_stats'].items():
@@ -531,6 +542,28 @@ elif st.session_state.match_complete:
                     'SR': sr,
                 })
             st.dataframe(data, use_container_width=True, hide_index=True)
+
+        # Bowling scorecard
+        bowling_team_name = innings_score.get('bowling_team', 'Bowling Team')
+        st.markdown(f"**⚾ Bowling ({bowling_team_name})**")
+        if innings_score.get('bowlers_stats'):
+            bowl_data = []
+            for name, stats in innings_score['bowlers_stats'].items():
+                overs_str = f"{stats['balls'] // 6}.{stats['balls'] % 6}"
+                econ = round((stats['runs'] / (stats['balls'] / 6)), 2) if stats['balls'] > 0 else 0.0
+                bowl_data.append({
+                    'Bowler': name,
+                    'Overs': overs_str,
+                    'Runs': stats['runs'],
+                    'Wickets': stats['wickets'],
+                    'Maidens': stats['maidens'],
+                    'Econ': econ,
+                })
+            st.dataframe(bowl_data, use_container_width=True, hide_index=True)
+        else:
+            st.info("No bowling stats recorded")
+
+        st.markdown("---")
 
     if st.button("🆕 Start New Match", type="primary"):
         reset_match()
@@ -815,7 +848,7 @@ elif st.session_state.setup_step == 'playing':
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: gray;'>"
-    "Built with ❤️ using Streamlit | Free to use forever 🏏"
+    "Built with ❤️ | Free to use forever 🏏"
     "</div>",
     unsafe_allow_html=True
 )
