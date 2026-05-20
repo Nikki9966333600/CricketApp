@@ -7,7 +7,7 @@ import streamlit as st
 
 # Page configuration
 st.set_page_config(
-    page_title="Cricket Score Calculator",
+    page_title="Cricket Score",
     page_icon="🏏",
     layout="wide",
     initial_sidebar_state="expanded"
