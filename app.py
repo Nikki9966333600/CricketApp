@@ -296,7 +296,7 @@ def reset_match():
 
 
 # Header
-st.markdown('<div class="main-header">🏏 Cricket Score Calculator</div>',
+st.markdown('<div class="main-header">🏏 Cricket Score</div>',
             unsafe_allow_html=True)
 
 # ============ SETUP STEP 1: TEAMS ============
