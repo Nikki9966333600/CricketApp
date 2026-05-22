@@ -416,7 +416,21 @@ elif st.session_state.setup_step == 'toss':
 
     if not st.session_state.toss_done:
         st.markdown(f"### {st.session_state.team1_name}  🆚  {st.session_state.team2_name}")
-        st.markdown("<div style='text-align:center; font-size:5rem;'>🪙</div>", unsafe_allow_html=True)
+        # Static coin (gentle float) before flipping
+        st.markdown("""
+        <style>
+            @keyframes floaty {
+                0%, 100% { transform: translateY(0); }
+                50% { transform: translateY(-12px); }
+            }
+            .coin-static {
+                text-align: center;
+                font-size: 6rem;
+                animation: floaty 2s ease-in-out infinite;
+            }
+        </style>
+        <div class="coin-static">🪙</div>
+        """, unsafe_allow_html=True)
         st.info("Click the button below to flip the coin!")
 
         if st.button("🪙 Flip the Coin!", type="primary"):
@@ -425,6 +439,21 @@ elif st.session_state.setup_step == 'toss':
             st.session_state.toss_done = True
             st.rerun()
     else:
+        # Spinning coin animation that plays once, then settles
+        st.markdown("""
+        <style>
+            @keyframes flip-spin {
+                0%   { transform: rotateY(0deg) scale(1); }
+                100% { transform: rotateY(1800deg) scale(1); }
+            }
+            .coin-flip {
+                text-align: center;
+                font-size: 6rem;
+                animation: flip-spin 1.2s ease-out;
+            }
+        </style>
+        <div class="coin-flip">🪙</div>
+        """, unsafe_allow_html=True)
         st.success(f"🎉 **{st.session_state.toss_winner}** won the toss!")
         st.markdown(f"**{st.session_state.toss_winner}**, what would you like to do?")
 
@@ -927,7 +956,7 @@ elif st.session_state.setup_step == 'playing':
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: gray;'>"
-    "Built with ❤️ | Free to use forever 🏏"
+    "Built by Nikhil with ❤️ | Free to use forever 🏏"
     "</div>",
     unsafe_allow_html=True
 )
