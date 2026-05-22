@@ -4,6 +4,7 @@ A free, user-friendly cricket scoring app built with Streamlit.
 """
 
 import streamlit as st
+import random
 
 # Page configuration
 st.set_page_config(
@@ -78,6 +79,9 @@ def init_session_state():
         'awaiting_new_bowler': False,
         'over_runs': 0,  # Track runs in current over for maiden detection
         'consecutive_wides': 0,  # Track wides in a row for custom wide rule
+        'toss_winner': None,  # Which team won the toss
+        'toss_decision': None,  # 'Bat' or 'Bowl'
+        'toss_done': False,  # Whether the coin has been flipped
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -245,7 +249,7 @@ def add_ball(runs_scored, is_wicket=False, extra_type=None):
     # Check if innings is over
     max_balls = st.session_state.total_overs * 6
     batting_team_size = len(get_batting_team_players())
-    
+
     if (st.session_state.balls >= max_balls or
             st.session_state.wickets >= batting_team_size - 1):
         end_innings()
@@ -402,9 +406,60 @@ if st.session_state.setup_step == 'teams':
             "Players per Team", min_value=2, max_value=15,
             value=st.session_state.players_per_team)
 
-    if st.button("➡️ Next: Add Players", type="primary"):
-        st.session_state.setup_step = 'players'
+    if st.button("➡️ Next: Coin Toss", type="primary"):
+        st.session_state.setup_step = 'toss'
         st.rerun()
+
+# ============ SETUP STEP: COIN TOSS ============
+elif st.session_state.setup_step == 'toss':
+    st.subheader("🪙 Coin Toss")
+
+    if not st.session_state.toss_done:
+        st.markdown(f"### {st.session_state.team1_name}  🆚  {st.session_state.team2_name}")
+        st.markdown("<div style='text-align:center; font-size:5rem;'>🪙</div>", unsafe_allow_html=True)
+        st.info("Click the button below to flip the coin!")
+
+        if st.button("🪙 Flip the Coin!", type="primary"):
+            winner = random.choice([st.session_state.team1_name, st.session_state.team2_name])
+            st.session_state.toss_winner = winner
+            st.session_state.toss_done = True
+            st.rerun()
+    else:
+        st.success(f"🎉 **{st.session_state.toss_winner}** won the toss!")
+        st.markdown(f"**{st.session_state.toss_winner}**, what would you like to do?")
+
+        decision = st.radio(
+            "Choose:",
+            ["Bat", "Bowl"],
+            horizontal=True
+        )
+
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔄 Re-flip Coin"):
+                st.session_state.toss_done = False
+                st.session_state.toss_winner = None
+                st.rerun()
+        with col2:
+            if st.button("➡️ Next: Add Players", type="primary"):
+                st.session_state.toss_decision = decision
+                # Set batting/bowling based on toss decision
+                if decision == "Bat":
+                    st.session_state.batting_team = st.session_state.toss_winner
+                else:
+                    # Toss winner bowls, so the other team bats
+                    st.session_state.batting_team = (
+                        st.session_state.team2_name
+                        if st.session_state.toss_winner == st.session_state.team1_name
+                        else st.session_state.team1_name
+                    )
+                st.session_state.bowling_team = (
+                    st.session_state.team2_name
+                    if st.session_state.batting_team == st.session_state.team1_name
+                    else st.session_state.team1_name
+                )
+                st.session_state.setup_step = 'players'
+                st.rerun()
 
 # ============ SETUP STEP 2: PLAYERS ============
 elif st.session_state.setup_step == 'players':
@@ -449,6 +504,9 @@ elif st.session_state.setup_step == 'players':
     with col1:
         if st.button("⬅️ Back to Teams"):
             st.session_state.setup_step = 'teams'
+            st.session_state.toss_done = False
+            st.session_state.toss_winner = None
+            st.session_state.toss_decision = None
             st.rerun()
     with col2:
         if st.button("➡️ Next: Choose Openers", type="primary"):
@@ -460,17 +518,10 @@ elif st.session_state.setup_step == 'players':
 # ============ SETUP STEP 3: OPENING BATSMEN ============
 elif st.session_state.setup_step == 'opening':
     if st.session_state.innings == 1:
-        st.subheader("🎯 Step 3: Choose Opening Batsmen & Who Bats First")
-        batting_first = st.radio(
-            "Which team bats first?",
-            [st.session_state.team1_name, st.session_state.team2_name],
-            horizontal=True
-        )
-        st.session_state.batting_team = batting_first
-        st.session_state.bowling_team = (
-            st.session_state.team2_name
-            if batting_first == st.session_state.team1_name
-            else st.session_state.team1_name
+        st.subheader("🎯 Choose Opening Players")
+        st.success(
+            f"🪙 {st.session_state.toss_winner} won the toss and chose to "
+            f"{st.session_state.toss_decision.lower()}."
         )
     else:
         st.subheader(f"🎯 Innings 2: Choose Opening Batsmen for {st.session_state.batting_team}")
@@ -607,6 +658,11 @@ elif st.session_state.setup_step == 'playing':
         st.info(f"Innings: {st.session_state.innings}/2")
         st.info(f"Batting: {st.session_state.batting_team}")
         st.info(f"Bowling: {st.session_state.bowling_team}")
+        if st.session_state.toss_winner:
+            st.caption(
+                f"🪙 {st.session_state.toss_winner} won the toss & chose to "
+                f"{st.session_state.toss_decision.lower()}"
+            )
 
         st.markdown("---")
         if st.button("🔄 Reset Match"):
