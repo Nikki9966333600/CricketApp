@@ -1,3 +1,5 @@
+https://cricket-scoretracking-app.streamlit.app/
+
 # 🏏 Cricket Score Calculator
 
 A free, user-friendly cricket scoring app built with Python and Streamlit. Track scores, wickets, overs, run rates, and more — all in a clean web interface.
