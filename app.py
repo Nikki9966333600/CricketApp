@@ -5,6 +5,21 @@ A free, user-friendly cricket scoring app built with Streamlit.
 
 import streamlit as st
 import random
+import string
+from supabase import create_client
+from streamlit_autorefresh import st_autorefresh
+
+# Connect to Supabase (cached so it only connects once)
+@st.cache_resource
+def get_supabase():
+    try:
+        url = st.secrets["SUPABASE_URL"]
+        key = st.secrets["SUPABASE_KEY"]
+        return create_client(url, key)
+    except Exception:
+        return None
+
+supabase = get_supabase()
 
 # Page configuration
 st.set_page_config(
@@ -82,6 +97,8 @@ def init_session_state():
         'toss_winner': None,  # Which team won the toss
         'toss_decision': None,  # 'Bat' or 'Bowl'
         'toss_done': False,  # Whether the coin has been flipped
+        'match_code': None,  # Cloud match code for sharing
+        'viewer_mode': False,  # True if this device is just watching, not scoring
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -379,6 +396,63 @@ def reset_match():
         del st.session_state[key]
     init_session_state()
 
+# ===== SUPABASE SAVE / LOAD =====
+# Keys we persist to the cloud (everything needed to restore a match)
+SAVE_KEYS = [
+    'setup_step', 'team1_name', 'team2_name', 'total_overs', 'players_per_team',
+    'team1_players', 'team2_players', 'batting_team', 'bowling_team', 'runs',
+    'wickets', 'balls', 'extras', 'ball_history', 'innings', 'team1_score',
+    'team2_score', 'target', 'match_complete', 'striker', 'non_striker',
+    'batsmen_stats', 'next_batsman_index', 'awaiting_new_batsman',
+    'current_bowler', 'bowlers_stats', 'awaiting_new_bowler', 'over_runs',
+    'consecutive_wides', 'toss_winner', 'toss_decision', 'toss_done',
+]
+
+
+def generate_match_code():
+    """Generate a short random match code like CRIC + 2 digits."""
+    return "CRIC" + ''.join(random.choices(string.digits, k=3))
+
+
+def build_state_dict():
+    """Collect the current match state into a plain dict for saving."""
+    return {key: st.session_state.get(key) for key in SAVE_KEYS}
+
+
+def save_match_to_cloud():
+    """Save (insert or update) the current match to Supabase."""
+    if supabase is None:
+        return False, "Cloud storage not configured."
+    try:
+        state = build_state_dict()
+        code = st.session_state.get('match_code')
+        if not code:
+            return False, "No match code set."
+        # Upsert: insert if new, update if exists
+        supabase.table('matches').upsert({
+            'match_code': code,
+            'state': state,
+        }, on_conflict='match_code').execute()
+        return True, "Saved!"
+    except Exception as e:
+        return False, f"Save failed: {e}"
+
+
+def load_match_from_cloud(code):
+    """Load a match by code and restore it into session_state."""
+    if supabase is None:
+        return False, "Cloud storage not configured."
+    try:
+        result = supabase.table('matches').select('state').eq('match_code', code).execute()
+        if not result.data:
+            return False, "Match code not found."
+        state = result.data[0]['state']
+        for key, value in state.items():
+            st.session_state[key] = value
+        st.session_state['match_code'] = code
+        return True, "Loaded!"
+    except Exception as e:
+        return False, f"Load failed: {e}"
 
 # Header
 st.markdown('<div class="main-header">🏏 Cricket Score</div>',
@@ -409,6 +483,22 @@ if st.session_state.setup_step == 'teams':
     if st.button("➡️ Next: Coin Toss", type="primary"):
         st.session_state.setup_step = 'toss'
         st.rerun()
+
+    # ===== LOAD AN EXISTING MATCH FROM CLOUD =====
+    st.markdown("---")
+    st.markdown("#### 📲 Or load a saved match")
+    load_code = st.text_input("Enter Match Code (e.g. CRIC123)", key="load_code_input").strip().upper()
+    if st.button("📥 Load Match"):
+        if load_code:
+            ok, msg = load_match_from_cloud(load_code)
+            if ok:
+                st.session_state.viewer_mode = True
+                st.success(f"Loaded match {load_code}!")
+                st.rerun()
+            else:
+                st.error(msg)
+        else:
+            st.warning("Please enter a match code.")
 
 # ============ SETUP STEP: COIN TOSS ============
 elif st.session_state.setup_step == 'toss':
@@ -679,6 +769,16 @@ elif st.session_state.match_complete:
 # ============ ACTIVE MATCH - SCORING ============
 elif st.session_state.setup_step == 'playing':
 
+    # ===== VIEWER MODE: auto-refresh and reload from cloud =====
+    if st.session_state.get('viewer_mode') and st.session_state.get('match_code'):
+        # Auto-refresh every 10 seconds
+        st_autorefresh(interval=10000, key="viewer_refresh")
+        # Reload the latest match state from the cloud
+        load_match_from_cloud(st.session_state.match_code)
+        # Keep viewer_mode True (load doesn't set it)
+        st.session_state.viewer_mode = True
+        st.info("👁️ **Viewing Mode** — auto-updates every 10 seconds. You cannot score in this mode.")
+
     # Sidebar
     with st.sidebar:
         st.header("⚙️ Match Info")
@@ -692,6 +792,33 @@ elif st.session_state.setup_step == 'playing':
                 f"🪙 {st.session_state.toss_winner} won the toss & chose to "
                 f"{st.session_state.toss_decision.lower()}"
             )
+
+        st.markdown("---")
+
+        # ===== CLOUD SAVE / SHARE =====
+        st.markdown("### ☁️ Cloud Save")
+        if supabase is None:
+            st.caption("⚠️ Cloud storage not configured")
+        else:
+            if not st.session_state.get('match_code'):
+                if st.button("💾 Save & Get Code"):
+                    st.session_state.match_code = generate_match_code()
+                    ok, msg = save_match_to_cloud()
+                    if ok:
+                        st.success(f"Saved! Code: {st.session_state.match_code}")
+                    else:
+                        st.error(msg)
+                        st.session_state.match_code = None
+                    st.rerun()
+            else:
+                st.success(f"Match Code: **{st.session_state.match_code}**")
+                st.caption("Share this code so others can follow on their phones.")
+                if st.button("💾 Update Cloud"):
+                    ok, msg = save_match_to_cloud()
+                    if ok:
+                        st.success("Updated!")
+                    else:
+                        st.error(msg)
 
         st.markdown("---")
         if st.button("🔄 Reset Match"):
@@ -820,8 +947,10 @@ elif st.session_state.setup_step == 'playing':
 
     st.markdown("---")
 
-    # Scoring buttons (only show if not awaiting new batsman or new bowler)
-    if not st.session_state.awaiting_new_batsman and not st.session_state.awaiting_new_bowler:
+    # Scoring buttons (hidden in viewer mode)
+    if (not st.session_state.awaiting_new_batsman
+            and not st.session_state.awaiting_new_bowler
+            and not st.session_state.get('viewer_mode')):
         st.subheader("📝 Add Score")
 
         st.markdown("**Runs Scored:**")
