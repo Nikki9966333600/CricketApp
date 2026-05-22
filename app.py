@@ -77,6 +77,7 @@ def init_session_state():
         'bowlers_stats': {},  # {bowler_name: {balls, runs, wickets, maidens, overs_bowled}}
         'awaiting_new_bowler': False,
         'over_runs': 0,  # Track runs in current over for maiden detection
+        'consecutive_wides': 0,  # Track wides in a row for custom wide rule
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -154,6 +155,19 @@ def init_bowler_stats(player_name):
 
 def add_ball(runs_scored, is_wicket=False, extra_type=None):
     """Add a ball to the game"""
+
+    # ===== CUSTOM EXTRAS RULES =====
+    # Wide: count consecutive wides. Every even-numbered wide (2nd, 4th...) = 1 run, odd = 0 runs.
+    # No Ball: 0 runs, ball does not count.
+    if extra_type == 'Wide':
+        st.session_state.consecutive_wides += 1
+        runs_scored = 1 if st.session_state.consecutive_wides % 2 == 0 else 0
+    elif extra_type == 'No Ball':
+        runs_scored = 0
+    else:
+        # Any legal delivery resets the consecutive wide counter
+        st.session_state.consecutive_wides = 0
+
     ball_data = {
         'over': calculate_overs(st.session_state.balls),
         'runs': runs_scored,
@@ -166,31 +180,23 @@ def add_ball(runs_scored, is_wicket=False, extra_type=None):
     # Update bowler stats
     bowler = st.session_state.current_bowler
     if bowler and bowler in st.session_state.bowlers_stats:
-        # Bowler gets credit/blame for runs (wides and no-balls count as bowler's runs)
         st.session_state.bowlers_stats[bowler]['runs'] += runs_scored
-        # Wides and no-balls don't count as a legal ball bowled
         if extra_type not in ['Wide', 'No Ball']:
             st.session_state.bowlers_stats[bowler]['balls'] += 1
             st.session_state.over_runs += runs_scored
         else:
             st.session_state.over_runs += runs_scored
-        # Bowler gets wicket credit (except for run outs - we treat all as bowler's wicket for simplicity)
         if is_wicket:
             st.session_state.bowlers_stats[bowler]['wickets'] += 1
 
     st.session_state.runs += runs_scored
 
-    # Update batsman stats (only count valid balls and runs)
+    # Update batsman stats
     striker = st.session_state.striker
     if striker and striker in st.session_state.batsmen_stats:
-        # Wides don't count as ball faced or runs for the batter
-        # No-balls: ball not counted but runs off the bat (other than the no-ball penalty) count
-        # Byes: ball is counted but no runs to batter
         if extra_type not in ['Wide', 'No Ball']:
             st.session_state.batsmen_stats[striker]['balls'] += 1
-
         if extra_type is None:
-            # Normal run scored by batter
             st.session_state.batsmen_stats[striker]['runs'] += runs_scored
             if runs_scored == 4:
                 st.session_state.batsmen_stats[striker]['fours'] += 1
@@ -205,31 +211,31 @@ def add_ball(runs_scored, is_wicket=False, extra_type=None):
 
     if is_wicket:
         st.session_state.wickets += 1
-        # Mark striker as out
+
         if striker and striker in st.session_state.batsmen_stats:
             st.session_state.batsmen_stats[striker]['out'] = True
             st.session_state.batsmen_stats[striker]['on_field'] = False
         st.session_state.awaiting_new_batsman = True
 
-    # Rotate strike on odd runs (only on legal deliveries, except wickets)
+    # Rotate strike on odd runs (legal deliveries only, except wickets)
     if not is_wicket and extra_type not in ['Wide', 'No Ball'] and runs_scored % 2 == 1:
         st.session_state.striker, st.session_state.non_striker = (
             st.session_state.non_striker, st.session_state.striker
         )
 
-    # End of over - rotate strike and check for maiden + new bowler
+    # End of over - rotate strike, check maiden, prompt new bowler
     if st.session_state.balls > 0 and st.session_state.balls % 6 == 0 and extra_type not in ['Wide', 'No Ball']:
-        # Check for maiden over (0 runs in the over)
+
         if st.session_state.over_runs == 0 and bowler:
             st.session_state.bowlers_stats[bowler]['maidens'] += 1
-        # Reset over runs counter
+
         st.session_state.over_runs = 0
-        # Rotate strike
+
         if not st.session_state.awaiting_new_batsman:
             st.session_state.striker, st.session_state.non_striker = (
                 st.session_state.non_striker, st.session_state.striker
             )
-        # Prompt for new bowler (a bowler can't bowl consecutive overs)
+
         max_balls = st.session_state.total_overs * 6
         if st.session_state.balls < max_balls:
             st.session_state.awaiting_new_bowler = True
@@ -239,7 +245,7 @@ def add_ball(runs_scored, is_wicket=False, extra_type=None):
     # Check if innings is over
     max_balls = st.session_state.total_overs * 6
     batting_team_size = len(get_batting_team_players())
-    # All out = wickets == players - 1 (last batter has no partner)
+    
     if (st.session_state.balls >= max_balls or
             st.session_state.wickets >= batting_team_size - 1):
         end_innings()
@@ -258,6 +264,15 @@ def undo_last_ball():
 
     last_ball = st.session_state.ball_history.pop()
     st.session_state.runs -= last_ball['runs']
+
+    # Revert bowler stats
+    bowler = last_ball.get('bowler')
+    if bowler and bowler in st.session_state.bowlers_stats:
+        st.session_state.bowlers_stats[bowler]['runs'] -= last_ball['runs']
+        if last_ball['extra'] not in ['Wide', 'No Ball']:
+            st.session_state.bowlers_stats[bowler]['balls'] -= 1
+        if last_ball['wicket']:
+            st.session_state.bowlers_stats[bowler]['wickets'] -= 1
 
     # Revert batsman stats
     striker = last_ball.get('striker')
@@ -284,6 +299,18 @@ def undo_last_ball():
             st.session_state.batsmen_stats[striker]['on_field'] = True
         st.session_state.awaiting_new_batsman = False
         st.session_state.striker = striker
+
+    # Recalculate consecutive_wides by walking back through history
+    count = 0
+    for ball in reversed(st.session_state.ball_history):
+        if ball['extra'] == 'Wide':
+            count += 1
+        else:
+            break
+    st.session_state.consecutive_wides = count
+
+    # Also revert the awaiting_new_bowler flag if we undid the last ball of an over
+    st.session_state.awaiting_new_bowler = False
 
 
 def end_innings():
@@ -727,25 +754,21 @@ elif st.session_state.setup_step == 'playing':
                     st.rerun()
 
         st.markdown("**Special:**")
-        col1, col2, col3, col4, col5 = st.columns(5)
+        col1, col2, col3, col4 = st.columns(4)
 
         with col1:
             if st.button("🎯 WICKET", type="primary"):
                 add_ball(0, is_wicket=True)
                 st.rerun()
         with col2:
-            if st.button("Wide (+1)"):
-                add_ball(1, extra_type='Wide')
+            if st.button("Wide"):
+                add_ball(0, extra_type='Wide')
                 st.rerun()
         with col3:
-            if st.button("No Ball (+1)"):
-                add_ball(1, extra_type='No Ball')
+            if st.button("No Ball"):
+                add_ball(0, extra_type='No Ball')
                 st.rerun()
         with col4:
-            if st.button("Bye (+1)"):
-                add_ball(1, extra_type='Bye')
-                st.rerun()
-        with col5:
             if st.button("↩️ UNDO"):
                 undo_last_ball()
                 st.rerun()
