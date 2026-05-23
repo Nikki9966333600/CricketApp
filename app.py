@@ -454,6 +454,11 @@ def load_match_from_cloud(code):
     except Exception as e:
         return False, f"Load failed: {e}"
 
+def auto_save():
+    """Auto-save to cloud only if a match code already exists (i.e. user opted in)."""
+    if st.session_state.get('match_code') and not st.session_state.get('viewer_mode'):
+        save_match_to_cloud()
+
 # Header
 st.markdown('<div class="main-header">🏏 Cricket Score</div>',
             unsafe_allow_html=True)
@@ -812,11 +817,11 @@ elif st.session_state.setup_step == 'playing':
                     st.rerun()
             else:
                 st.success(f"Match Code: **{st.session_state.match_code}**")
-                st.caption("Share this code so others can follow on their phones.")
-                if st.button("💾 Update Cloud"):
+                st.caption("✅ Auto-saving after every action. Share this code so others can follow live.")
+                if st.button("💾 Force Save Now"):
                     ok, msg = save_match_to_cloud()
                     if ok:
-                        st.success("Updated!")
+                        st.success("Saved!")
                     else:
                         st.error(msg)
 
@@ -873,6 +878,7 @@ elif st.session_state.setup_step == 'playing':
             st.session_state.current_bowler = new_bowler
             init_bowler_stats(new_bowler)
             st.session_state.awaiting_new_bowler = False
+            auto_save()
             st.rerun()
     else:
         bowler = st.session_state.current_bowler
@@ -909,6 +915,7 @@ elif st.session_state.setup_step == 'playing':
                 st.session_state.striker = new_batsman
                 init_batsman_stats(new_batsman)
                 st.session_state.awaiting_new_batsman = False
+                auto_save()
                 st.rerun()
         else:
             st.error("No more batsmen available - innings should end")
@@ -943,6 +950,7 @@ elif st.session_state.setup_step == 'playing':
             st.session_state.striker, st.session_state.non_striker = (
                 st.session_state.non_striker, st.session_state.striker
             )
+            auto_save()
             st.rerun()
 
     st.markdown("---")
@@ -965,6 +973,7 @@ elif st.session_state.setup_step == 'playing':
                     label = "6️⃣ SIX"
                 if st.button(label, key=f"run_{runs}"):
                     add_ball(runs)
+                    auto_save()
                     st.rerun()
 
         st.markdown("**Special:**")
@@ -973,18 +982,22 @@ elif st.session_state.setup_step == 'playing':
         with col1:
             if st.button("🎯 WICKET", type="primary"):
                 add_ball(0, is_wicket=True)
+                auto_save()
                 st.rerun()
         with col2:
             if st.button("Wide"):
                 add_ball(0, extra_type='Wide')
+                auto_save()
                 st.rerun()
         with col3:
             if st.button("No Ball"):
                 add_ball(0, extra_type='No Ball')
+                auto_save()
                 st.rerun()
         with col4:
             if st.button("↩️ UNDO"):
                 undo_last_ball()
+                auto_save()
                 st.rerun()
 
         # Manual controls
@@ -993,10 +1006,12 @@ elif st.session_state.setup_step == 'playing':
         with col1:
             if st.button("🏁 End Innings"):
                 end_innings()
+                auto_save()
                 st.rerun()
         with col2:
             if st.button("🛑 End Match"):
                 end_match()
+                auto_save()
                 st.rerun()
     # ===== BOWLING SCORECARD =====
     st.subheader("⚾ Bowling Figures")
