@@ -109,8 +109,12 @@ st.markdown("""
         display: flex;
         align-items: center;
         gap: 8px;
-        margin-top: 14px;
+        margin-top: -8px;
+        margin-bottom: 14px;
         flex-wrap: wrap;
+        background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+        border-radius: 0 0 14px 14px;
+        padding: 4px 26px 18px 26px;
     }
     .over-label {
         font-size: 0.85rem;
@@ -999,10 +1003,14 @@ elif st.session_state.setup_step == 'playing':
                 &nbsp;{ns_stats.get('runs', 0)} ({ns_stats.get('balls', 0)})</span>
         </div>
         {chase_html}
-        {render_over_tracker()}
     </div>
     """
     st.markdown(scoreboard_html, unsafe_allow_html=True)
+
+    # Render the over tracker separately (avoids markdown indentation issues)
+    tracker_html = render_over_tracker()
+    if tracker_html:
+        st.markdown(tracker_html, unsafe_allow_html=True)
 
     # ===== CURRENT BOWLER =====
     st.subheader("⚾ Current Bowler")
