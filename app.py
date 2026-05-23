@@ -105,6 +105,36 @@ st.markdown("""
         font-weight: 600;
         margin-top: 6px;
     }
+    .over-tracker {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 14px;
+        flex-wrap: wrap;
+    }
+    .over-label {
+        font-size: 0.85rem;
+        opacity: 0.8;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-right: 4px;
+    }
+    .ball {
+        width: 34px;
+        height: 34px;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: 700;
+        font-size: 0.9rem;
+        color: #fff;
+    }
+    .ball-dot { background: #6c757d; }
+    .ball-run { background: #2e9e4f; }
+    .ball-boundary { background: #1565c0; }
+    .ball-wicket { background: #d32f2f; }
+    .ball-extra { background: #f9a825; color: #222; font-size: 0.75rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -505,6 +535,58 @@ def auto_save():
     """Auto-save to cloud only if a match code already exists (i.e. user opted in)."""
     if st.session_state.get('match_code') and not st.session_state.get('viewer_mode'):
         save_match_to_cloud()
+
+def get_current_over_balls():
+    """Return the deliveries belonging to the current (or just-completed) over."""
+    history = st.session_state.ball_history
+    total_balls = st.session_state.balls
+    legal_in_current = total_balls % 6
+    # If an over just completed, show that full over instead of an empty strip
+    if legal_in_current == 0 and total_balls > 0:
+        legal_target = 6
+    else:
+        legal_target = legal_in_current
+
+    collected = []
+    legal_seen = 0
+    for ball in reversed(history):
+        is_legal = ball['extra'] not in ['Wide', 'No Ball']
+        if is_legal:
+            if legal_seen >= legal_target:
+                break
+            legal_seen += 1
+        collected.append(ball)
+    collected.reverse()
+    return collected
+
+
+def render_over_tracker():
+    """Build the HTML for the this-over ball tracker."""
+    balls = get_current_over_balls()
+    if not balls:
+        return ""  # nothing to show yet
+
+    chips = []
+    for ball in balls:
+        if ball['wicket']:
+            chips.append('<div class="ball ball-wicket">W</div>')
+        elif ball['extra'] == 'Wide':
+            chips.append('<div class="ball ball-extra">WD</div>')
+        elif ball['extra'] == 'No Ball':
+            chips.append('<div class="ball ball-extra">NB</div>')
+        elif ball['runs'] == 0:
+            chips.append('<div class="ball ball-dot">•</div>')
+        elif ball['runs'] in (4, 6):
+            chips.append(f'<div class="ball ball-boundary">{ball["runs"]}</div>')
+        else:
+            chips.append(f'<div class="ball ball-run">{ball["runs"]}</div>')
+
+    return (
+        '<div class="over-tracker">'
+        '<span class="over-label">This over:</span>'
+        + ''.join(chips) +
+        '</div>'
+    )
 
 # Header
 st.markdown('<div class="main-header">🏏 Cricket Score</div>',
@@ -917,6 +999,7 @@ elif st.session_state.setup_step == 'playing':
                 &nbsp;{ns_stats.get('runs', 0)} ({ns_stats.get('balls', 0)})</span>
         </div>
         {chase_html}
+        {render_over_tracker()}
     </div>
     """
     st.markdown(scoreboard_html, unsafe_allow_html=True)
