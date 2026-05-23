@@ -58,6 +58,53 @@ st.markdown("""
         border-radius: 5px;
         border-left: 4px solid #6c757d;
     }
+    .scoreboard {
+        background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+        border-radius: 14px;
+        padding: 22px 26px;
+        color: #ffffff;
+        box-shadow: 0 4px 18px rgba(0,0,0,0.35);
+        margin-bottom: 1rem;
+    }
+    .sb-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 0.95rem;
+        letter-spacing: 0.5px;
+        opacity: 0.85;
+        text-transform: uppercase;
+    }
+    .sb-score {
+        font-size: 3.4rem;
+        font-weight: 800;
+        line-height: 1.1;
+        margin: 6px 0 2px 0;
+    }
+    .sb-overs {
+        font-size: 1.1rem;
+        opacity: 0.9;
+        margin-bottom: 10px;
+    }
+    .sb-batsmen {
+        display: flex;
+        gap: 28px;
+        font-size: 1rem;
+        margin-top: 8px;
+        flex-wrap: wrap;
+    }
+    .sb-bat-name { font-weight: 700; }
+    .sb-divider {
+        height: 1px;
+        background: rgba(255,255,255,0.18);
+        margin: 12px 0;
+    }
+    .sb-chase {
+        font-size: 1rem;
+        color: #ffd54f;
+        font-weight: 600;
+        margin-top: 6px;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -830,40 +877,49 @@ elif st.session_state.setup_step == 'playing':
             reset_match()
             st.rerun()
 
-    # Top stats row
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Batting", st.session_state.batting_team)
-    with col2:
-        st.metric("Score", f"{st.session_state.runs}/{st.session_state.wickets}")
-    with col3:
-        st.metric("Overs", f"{calculate_overs(st.session_state.balls)}/{st.session_state.total_overs}")
-    with col4:
-        crr = calculate_run_rate(st.session_state.runs, st.session_state.balls)
-        st.metric("Run Rate", crr)
+    # ===== BROADCAST SCOREBOARD =====
+    crr = calculate_run_rate(st.session_state.runs, st.session_state.balls)
+    striker = st.session_state.striker
+    non_striker = st.session_state.non_striker
+    s_stats = st.session_state.batsmen_stats.get(striker, {})
+    ns_stats = st.session_state.batsmen_stats.get(non_striker, {})
 
-    # Target info if 2nd innings
+    # Build chase line for 2nd innings
+    chase_html = ""
     if st.session_state.innings == 2 and st.session_state.target:
-        st.markdown("---")
-        col1, col2, col3, col4 = st.columns(4)
-        runs_needed = st.session_state.target - st.session_state.runs
-        balls_remaining = (st.session_state.total_overs * 6) - st.session_state.balls
+        runs_needed = max(0, st.session_state.target - st.session_state.runs)
+        balls_remaining = max(0, (st.session_state.total_overs * 6) - st.session_state.balls)
         rrr = calculate_required_run_rate(
-            st.session_state.target,
-            st.session_state.runs,
-            st.session_state.total_overs,
-            st.session_state.balls
+            st.session_state.target, st.session_state.runs,
+            st.session_state.total_overs, st.session_state.balls
         )
-        with col1:
-            st.metric("Target", st.session_state.target)
-        with col2:
-            st.metric("Runs Needed", max(0, runs_needed))
-        with col3:
-            st.metric("Balls Left", max(0, balls_remaining))
-        with col4:
-            st.metric("Required RR", rrr)
+        chase_html = (
+            f"<div class='sb-chase'>🎯 Need {runs_needed} runs from {balls_remaining} balls "
+            f"&nbsp;·&nbsp; Req. RR {rrr}</div>"
+        )
 
-    st.markdown("---")
+    scoreboard_html = f"""
+    <div class="scoreboard">
+        <div class="sb-top">
+            <span>🏏 {st.session_state.batting_team} — batting</span>
+            <span>Innings {st.session_state.innings}/2</span>
+        </div>
+        <div class="sb-score">{st.session_state.runs}-{st.session_state.wickets}</div>
+        <div class="sb-overs">
+            {calculate_overs(st.session_state.balls)} / {st.session_state.total_overs} overs
+            &nbsp;·&nbsp; CRR {crr}
+        </div>
+        <div class="sb-divider"></div>
+        <div class="sb-batsmen">
+            <span><span class="sb-bat-name">🏏 {striker} *</span>
+                &nbsp;{s_stats.get('runs', 0)} ({s_stats.get('balls', 0)})</span>
+            <span><span class="sb-bat-name">{non_striker}</span>
+                &nbsp;{ns_stats.get('runs', 0)} ({ns_stats.get('balls', 0)})</span>
+        </div>
+        {chase_html}
+    </div>
+    """
+    st.markdown(scoreboard_html, unsafe_allow_html=True)
 
     # ===== CURRENT BOWLER =====
     st.subheader("⚾ Current Bowler")
