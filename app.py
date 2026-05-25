@@ -6,8 +6,11 @@ A free, user-friendly cricket scoring app built with Streamlit.
 import streamlit as st
 import random
 import string
+import time
 from supabase import create_client
 from streamlit_autorefresh import st_autorefresh
+from PIL import Image, ImageDraw, ImageFont
+import io
 
 # Connect to Supabase (cached so it only connects once)
 @st.cache_resource
@@ -180,6 +183,8 @@ def init_session_state():
         'toss_done': False,  # Whether the coin has been flipped
         'match_code': None,  # Cloud match code for sharing
         'viewer_mode': False,  # True if this device is just watching, not scoring
+        'last_save_time': 0.0,    # throttle: timestamp of last cloud save
+        'pending_save': False,    # something changed but isn't saved yet
     }
     for key, value in defaults.items():
         if key not in st.session_state:
@@ -218,6 +223,106 @@ def get_strike_rate(runs, balls):
         return 0.0
     return round((runs / balls) * 100, 2)
 
+def _load_font(size, bold=False):
+    """Load a TTF font with graceful fallback to PIL default."""
+    candidates = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold
+        else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold
+        else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+        "DejaVuSans-Bold.ttf" if bold else "DejaVuSans.ttf",
+    ]
+    for path in candidates:
+        try:
+            return ImageFont.truetype(path, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def _top_batter(batsmen_stats):
+    if not batsmen_stats:
+        return None
+    name = max(batsmen_stats, key=lambda n: batsmen_stats[n].get('runs', 0))
+    return name, batsmen_stats[name]
+
+
+def _top_bowler(bowlers_stats):
+    if not bowlers_stats:
+        return None
+    def key(n):
+        s = bowlers_stats[n]
+        balls = s.get('balls', 0)
+        econ = (s.get('runs', 0) / (balls / 6)) if balls > 0 else 999
+        return (s.get('wickets', 0), -econ)
+    name = max(bowlers_stats, key=key)
+    return name, bowlers_stats[name]
+
+
+def generate_scorecard_image(t1, t2, result_text, total_overs):
+    """Build a shareable PNG scorecard. Returns PNG bytes."""
+    W, H = 1080, 1080
+    BG = (15, 32, 39)
+    CARD = (28, 54, 63)
+    ACCENT = (46, 158, 79)
+    GOLD = (255, 213, 79)
+    WHITE = (255, 255, 255)
+    MUTED = (170, 190, 195)
+
+    img = Image.new("RGB", (W, H), BG)
+    d = ImageDraw.Draw(img)
+
+    f_title = _load_font(58, bold=True)
+    f_team = _load_font(46, bold=True)
+    f_score = _load_font(72, bold=True)
+    f_overs = _load_font(30)
+    f_label = _load_font(26)
+    f_result = _load_font(40, bold=True)
+    f_small = _load_font(28)
+    f_foot = _load_font(24)
+
+    def center(text, font, y, fill=WHITE):
+        bbox = d.textbbox((0, 0), text, font=font)
+        w = bbox[2] - bbox[0]
+        d.text(((W - w) / 2, y), text, font=font, fill=fill)
+
+    center("MATCH RESULT", f_title, 50, ACCENT)
+
+    def innings_card(score, y):
+        d.rounded_rectangle([60, y, W - 60, y + 250], radius=24, fill=CARD)
+        d.text((100, y + 30), score['team'], font=f_team, fill=WHITE)
+        d.text((100, y + 95), f"{score['runs']}/{score['wickets']}",
+               font=f_score, fill=GOLD)
+        d.text((100, y + 185), f"{score['overs']} / {total_overs} overs",
+               font=f_overs, fill=MUTED)
+        tb = _top_batter(score.get('batsmen_stats', {}))
+        tw = _top_bowler(score.get('bowlers_stats', {}))
+        x_right = 560
+        if tb:
+            name, s = tb
+            d.text((x_right, y + 40), "Top scorer", font=f_label, fill=MUTED)
+            d.text((x_right, y + 75),
+                   f"{name}  {s.get('runs', 0)} ({s.get('balls', 0)})",
+                   font=f_small, fill=WHITE)
+        if tw:
+            name, s = tw
+            balls = s.get('balls', 0)
+            ov = f"{balls // 6}.{balls % 6}"
+            d.text((x_right, y + 140), "Best bowler", font=f_label, fill=MUTED)
+            d.text((x_right, y + 175),
+                   f"{name}  {s.get('wickets', 0)}/{s.get('runs', 0)} ({ov})",
+                   font=f_small, fill=WHITE)
+
+    innings_card(t1, 170)
+    innings_card(t2, 460)
+
+    d.rounded_rectangle([60, 770, W - 60, 900], radius=24, fill=ACCENT)
+    center(result_text, f_result, 815, WHITE)
+    center("Free Cricket Score App  •  built by Nikhil", f_foot, 1010, MUTED)
+
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 def get_batting_team_players():
     """Get the list of players from the currently batting team"""
@@ -258,16 +363,14 @@ def init_bowler_stats(player_name):
 def add_ball(runs_scored, is_wicket=False, extra_type=None):
     """Add a ball to the game"""
 
-    # ===== CUSTOM EXTRAS RULES =====
-    # Wide: count consecutive wides. Every even-numbered wide (2nd, 4th...) = 1 run, odd = 0 runs.
-    # No Ball: 0 runs, ball does not count.
+
     if extra_type == 'Wide':
         st.session_state.consecutive_wides += 1
         runs_scored = 1 if st.session_state.consecutive_wides % 2 == 0 else 0
     elif extra_type == 'No Ball':
         runs_scored = 0
     else:
-        # Any legal delivery resets the consecutive wide counter
+
         st.session_state.consecutive_wides = 0
 
     ball_data = {
@@ -279,7 +382,7 @@ def add_ball(runs_scored, is_wicket=False, extra_type=None):
         'bowler': st.session_state.current_bowler,
     }
 
-    # Update bowler stats
+
     bowler = st.session_state.current_bowler
     if bowler and bowler in st.session_state.bowlers_stats:
         st.session_state.bowlers_stats[bowler]['runs'] += runs_scored
@@ -293,7 +396,7 @@ def add_ball(runs_scored, is_wicket=False, extra_type=None):
 
     st.session_state.runs += runs_scored
 
-    # Update batsman stats
+
     striker = st.session_state.striker
     if striker and striker in st.session_state.batsmen_stats:
         if extra_type not in ['Wide', 'No Ball']:
@@ -305,46 +408,46 @@ def add_ball(runs_scored, is_wicket=False, extra_type=None):
             elif runs_scored == 6:
                 st.session_state.batsmen_stats[striker]['sixes'] += 1
 
-    # Wides and no-balls don't count as a legal ball
+
     if extra_type in ['Wide', 'No Ball']:
         st.session_state.extras += 1
     else:
         st.session_state.balls += 1
 
     if is_wicket:
+    
         st.session_state.wickets += 1
-
         if striker and striker in st.session_state.batsmen_stats:
             st.session_state.batsmen_stats[striker]['out'] = True
             st.session_state.batsmen_stats[striker]['on_field'] = False
         st.session_state.awaiting_new_batsman = True
 
-    # Rotate strike on odd runs (legal deliveries only, except wickets)
+   
     if not is_wicket and extra_type not in ['Wide', 'No Ball'] and runs_scored % 2 == 1:
         st.session_state.striker, st.session_state.non_striker = (
             st.session_state.non_striker, st.session_state.striker
         )
 
-    # End of over - rotate strike, check maiden, prompt new bowler
+   
     if st.session_state.balls > 0 and st.session_state.balls % 6 == 0 and extra_type not in ['Wide', 'No Ball']:
-
+   
         if st.session_state.over_runs == 0 and bowler:
             st.session_state.bowlers_stats[bowler]['maidens'] += 1
-
+   
+   
         st.session_state.over_runs = 0
-
         if not st.session_state.awaiting_new_batsman:
             st.session_state.striker, st.session_state.non_striker = (
                 st.session_state.non_striker, st.session_state.striker
             )
-
+      
         max_balls = st.session_state.total_overs * 6
         if st.session_state.balls < max_balls:
             st.session_state.awaiting_new_bowler = True
 
     st.session_state.ball_history.append(ball_data)
 
-    # Check if innings is over
+
     max_balls = st.session_state.total_overs * 6
     batting_team_size = len(get_batting_team_players())
 
@@ -352,7 +455,7 @@ def add_ball(runs_scored, is_wicket=False, extra_type=None):
             st.session_state.wickets >= batting_team_size - 1):
         end_innings()
 
-    # Check if chasing team won
+
     if (st.session_state.innings == 2 and
             st.session_state.target is not None and
             st.session_state.runs >= st.session_state.target):
@@ -367,7 +470,7 @@ def undo_last_ball():
     last_ball = st.session_state.ball_history.pop()
     st.session_state.runs -= last_ball['runs']
 
-    # Revert bowler stats
+
     bowler = last_ball.get('bowler')
     if bowler and bowler in st.session_state.bowlers_stats:
         st.session_state.bowlers_stats[bowler]['runs'] -= last_ball['runs']
@@ -376,7 +479,7 @@ def undo_last_ball():
         if last_ball['wicket']:
             st.session_state.bowlers_stats[bowler]['wickets'] -= 1
 
-    # Revert batsman stats
+
     striker = last_ball.get('striker')
     if striker and striker in st.session_state.batsmen_stats:
         if last_ball['extra'] not in ['Wide', 'No Ball']:
@@ -395,14 +498,14 @@ def undo_last_ball():
 
     if last_ball['wicket']:
         st.session_state.wickets -= 1
-        # Restore the batsman
+      
         if striker and striker in st.session_state.batsmen_stats:
             st.session_state.batsmen_stats[striker]['out'] = False
             st.session_state.batsmen_stats[striker]['on_field'] = True
         st.session_state.awaiting_new_batsman = False
         st.session_state.striker = striker
 
-    # Recalculate consecutive_wides by walking back through history
+
     count = 0
     for ball in reversed(st.session_state.ball_history):
         if ball['extra'] == 'Wide':
@@ -411,7 +514,7 @@ def undo_last_ball():
             break
     st.session_state.consecutive_wides = count
 
-    # Also revert the awaiting_new_bowler flag if we undid the last ball of an over
+
     st.session_state.awaiting_new_bowler = False
 
 
@@ -426,9 +529,9 @@ def end_innings():
             'bowling_team': st.session_state.bowling_team,
             'batsmen_stats': dict(st.session_state.batsmen_stats),
             'bowlers_stats': dict(st.session_state.bowlers_stats),
-        }
+        }  
         st.session_state.target = st.session_state.runs + 1
-        # Switch teams
+       
         if st.session_state.batting_team == st.session_state.team1_name:
             st.session_state.batting_team = st.session_state.team2_name
             st.session_state.bowling_team = st.session_state.team1_name
@@ -436,7 +539,7 @@ def end_innings():
             st.session_state.batting_team = st.session_state.team1_name
             st.session_state.bowling_team = st.session_state.team2_name
 
-        # Reset for second innings
+
         st.session_state.runs = 0
         st.session_state.wickets = 0
         st.session_state.balls = 0
@@ -478,7 +581,7 @@ def reset_match():
     init_session_state()
 
 # ===== SUPABASE SAVE / LOAD =====
-# Keys we persist to the cloud (everything needed to restore a match)
+
 SAVE_KEYS = [
     'setup_step', 'team1_name', 'team2_name', 'total_overs', 'players_per_team',
     'team1_players', 'team2_players', 'batting_team', 'bowling_team', 'runs',
@@ -491,7 +594,7 @@ SAVE_KEYS = [
 
 
 def generate_match_code():
-    """Generate a short random match code like CRIC + 2 digits."""
+    """Generate a short random match code like CRIC + 3 digits."""
     return "CRIC" + ''.join(random.choices(string.digits, k=3))
 
 
@@ -509,7 +612,7 @@ def save_match_to_cloud():
         code = st.session_state.get('match_code')
         if not code:
             return False, "No match code set."
-        # Upsert: insert if new, update if exists
+        
         supabase.table('matches').upsert({
             'match_code': code,
             'state': state,
@@ -535,17 +638,32 @@ def load_match_from_cloud(code):
     except Exception as e:
         return False, f"Load failed: {e}"
 
-def auto_save():
-    """Auto-save to cloud only if a match code already exists (i.e. user opted in)."""
-    if st.session_state.get('match_code') and not st.session_state.get('viewer_mode'):
-        save_match_to_cloud()
+def auto_save(force=False):
+    """Save to cloud, but throttled. Marks state dirty and only pushes to
+    Supabase every few seconds or when force=True (over end, wicket, innings,
+    match). ball_history in session_state is always the live source of truth,
+    so nothing is lost between throttled saves."""
+    if not st.session_state.get('match_code') or st.session_state.get('viewer_mode'):
+        return
+    if supabase is None:
+        return
+
+    st.session_state.pending_save = True
+    now = time.time()
+    SAVE_INTERVAL = 8  # seconds between routine saves
+
+    if force or (now - st.session_state.get('last_save_time', 0) >= SAVE_INTERVAL):
+        ok, _ = save_match_to_cloud()
+        if ok:
+            st.session_state.last_save_time = now
+            st.session_state.pending_save = False
 
 def get_current_over_balls():
     """Return the deliveries belonging to the current (or just-completed) over."""
     history = st.session_state.ball_history
     total_balls = st.session_state.balls
     legal_in_current = total_balls % 6
-    # If an over just completed, show that full over instead of an empty strip
+
     if legal_in_current == 0 and total_balls > 0:
         legal_target = 6
     else:
@@ -568,7 +686,7 @@ def render_over_tracker():
     """Build the HTML for the this-over ball tracker."""
     balls = get_current_over_balls()
     if not balls:
-        return ""  # nothing to show yet
+        return ""
 
     chips = []
     for ball in balls:
@@ -622,7 +740,7 @@ if st.session_state.setup_step == 'teams':
         st.session_state.setup_step = 'toss'
         st.rerun()
 
-    # ===== LOAD AN EXISTING MATCH FROM CLOUD =====
+
     st.markdown("---")
     st.markdown("#### 📲 Or load a saved match")
     load_code = st.text_input("Enter Match Code (e.g. CRIC123)", key="load_code_input").strip().upper()
@@ -644,7 +762,7 @@ elif st.session_state.setup_step == 'toss':
 
     if not st.session_state.toss_done:
         st.markdown(f"### {st.session_state.team1_name}  🆚  {st.session_state.team2_name}")
-        # Static coin (gentle float) before flipping
+        
         st.markdown("""
         <style>
             @keyframes floaty {
@@ -667,7 +785,7 @@ elif st.session_state.setup_step == 'toss':
             st.session_state.toss_done = True
             st.rerun()
     else:
-        # Spinning coin animation that plays once, then settles
+       
         st.markdown("""
         <style>
             @keyframes flip-spin {
@@ -685,11 +803,7 @@ elif st.session_state.setup_step == 'toss':
         st.success(f"🎉 **{st.session_state.toss_winner}** won the toss!")
         st.markdown(f"**{st.session_state.toss_winner}**, what would you like to do?")
 
-        decision = st.radio(
-            "Choose:",
-            ["Bat", "Bowl"],
-            horizontal=True
-        )
+        decision = st.radio("Choose:", ["Bat", "Bowl"], horizontal=True)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -700,11 +814,11 @@ elif st.session_state.setup_step == 'toss':
         with col2:
             if st.button("➡️ Next: Add Players", type="primary"):
                 st.session_state.toss_decision = decision
-                # Set batting/bowling based on toss decision
+              
                 if decision == "Bat":
                     st.session_state.batting_team = st.session_state.toss_winner
                 else:
-                    # Toss winner bowls, so the other team bats
+              
                     st.session_state.batting_team = (
                         st.session_state.team2_name
                         if st.session_state.toss_winner == st.session_state.team1_name
@@ -733,11 +847,7 @@ elif st.session_state.setup_step == 'players':
                 if i < len(st.session_state.team1_players)
                 else f"Player {i+1}"
             )
-            name = st.text_input(
-                f"Player {i+1}",
-                value=default_name,
-                key=f"t1_player_{i}"
-            )
+            name = st.text_input(f"Player {i+1}", value=default_name, key=f"t1_player_{i}")
             team1_players_input.append(name)
 
     with col2:
@@ -749,11 +859,7 @@ elif st.session_state.setup_step == 'players':
                 if i < len(st.session_state.team2_players)
                 else f"Player {i+1}"
             )
-            name = st.text_input(
-                f"Player {i+1}",
-                value=default_name,
-                key=f"t2_player_{i}"
-            )
+            name = st.text_input(f"Player {i+1}", value=default_name, key=f"t2_player_{i}")
             team2_players_input.append(name)
 
     st.markdown("---")
@@ -785,30 +891,18 @@ elif st.session_state.setup_step == 'opening':
         st.info(f"Target: **{st.session_state.target}** runs in {st.session_state.total_overs} overs")
 
     batting_players = get_batting_team_players()
-
+   
     st.markdown(f"**Batting Team: {st.session_state.batting_team}**")
 
     col1, col2 = st.columns(2)
     with col1:
-        striker = st.selectbox(
-            "🏏 Striker (on strike)",
-            batting_players,
-            index=0
-        )
+        striker = st.selectbox("🏏 Striker (on strike)", batting_players, index=0)
     with col2:
         non_striker_options = [p for p in batting_players if p != striker]
-        non_striker = st.selectbox(
-            "🏃 Non-Striker",
-            non_striker_options,
-            index=0
-        )
+        non_striker = st.selectbox("🏃 Non-Striker", non_striker_options, index=0)
 
     bowling_players = get_bowling_team_players()
-    opening_bowler = st.selectbox(
-        "⚾ Opening Bowler",
-        bowling_players,
-        index=0
-    )
+    opening_bowler = st.selectbox("⚾ Opening Bowler", bowling_players, index=0)
 
     if st.button("🚀 Start Match!", type="primary"):
         st.session_state.striker = striker
@@ -817,7 +911,7 @@ elif st.session_state.setup_step == 'opening':
         init_batsman_stats(striker)
         init_batsman_stats(non_striker)
         init_bowler_stats(opening_bowler)
-        # Set next batsman index
+       
         st.session_state.next_batsman_index = 2
         st.session_state.setup_step = 'playing'
         st.rerun()
@@ -834,8 +928,8 @@ elif st.session_state.match_complete:
     with col1:
         st.markdown(f"### {t1['team']}")
         st.markdown(f"## {t1['runs']}/{t1['wickets']}")
+      
         st.markdown(f"**Overs:** {t1['overs']}")
-
     with col2:
         st.markdown(f"### {t2['team']}")
         st.markdown(f"## {t2['runs']}/{t2['wickets']}")
@@ -843,24 +937,45 @@ elif st.session_state.match_complete:
 
     st.markdown("---")
 
-    # Determine winner
+    # Determine winner (capture result_text for the shareable image)
     if t1['runs'] > t2['runs']:
         margin = t1['runs'] - t2['runs']
-        st.success(f"🎉 **{t1['team']} won by {margin} runs!**")
+        result_text = f"{t1['team']} won by {margin} runs!"
+        st.success(f"🎉 **{result_text}**")
     elif t2['runs'] > t1['runs']:
         wickets_left = (st.session_state.players_per_team - 1) - t2['wickets']
-        st.success(f"🎉 **{t2['team']} won by {wickets_left} wickets!**")
+        result_text = f"{t2['team']} won by {wickets_left} wickets!"
+        st.success(f"🎉 **{result_text}**")
     else:
-        st.warning("🤝 **Match Tied!**")
+        result_text = "Match Tied!"
+        st.warning(f"🤝 **{result_text}**")
 
-    # Show full scorecards
+    # ===== SHAREABLE SCORECARD IMAGE =====
+    st.markdown("---")
+    st.subheader("📸 Share this result")
+    try:
+        img_bytes = generate_scorecard_image(
+            t1, t2, result_text, st.session_state.total_overs
+        )
+        st.image(img_bytes, caption="Your shareable scorecard", width=400)
+        st.download_button(
+            "⬇️ Download scorecard image",
+            data=img_bytes,
+            file_name=f"{t1['team']}_vs_{t2['team']}_scorecard.png",
+            mime="image/png",
+            type="primary",
+        )
+        st.caption("Save it and post to your WhatsApp group! 🏏")
+    except Exception as e:
+        st.warning(f"Couldn't generate the scorecard image: {e}")
+
     st.markdown("---")
     st.subheader("📊 Full Scorecards")
 
     for innings_score in [t1, t2]:
         st.markdown(f"### {innings_score['team']} - {innings_score['runs']}/{innings_score['wickets']} ({innings_score['overs']} overs)")
 
-        # Batting scorecard
+
         st.markdown("**🏏 Batting**")
         if innings_score.get('batsmen_stats'):
             data = []
@@ -868,17 +983,13 @@ elif st.session_state.match_complete:
                 status = "out" if stats['out'] else "not out"
                 sr = get_strike_rate(stats['runs'], stats['balls'])
                 data.append({
-                    'Batsman': name,
-                    'Status': status,
-                    'Runs': stats['runs'],
-                    'Balls': stats['balls'],
-                    '4s': stats['fours'],
-                    '6s': stats['sixes'],
-                    'SR': sr,
+                    'Batsman': name, 'Status': status, 'Runs': stats['runs'],
+                    'Balls': stats['balls'], '4s': stats['fours'],
+                    '6s': stats['sixes'], 'SR': sr,
                 })
             st.dataframe(data, use_container_width=True, hide_index=True)
 
-        # Bowling scorecard
+
         bowling_team_name = innings_score.get('bowling_team', 'Bowling Team')
         st.markdown(f"**⚾ Bowling ({bowling_team_name})**")
         if innings_score.get('bowlers_stats'):
@@ -887,12 +998,8 @@ elif st.session_state.match_complete:
                 overs_str = f"{stats['balls'] // 6}.{stats['balls'] % 6}"
                 econ = round((stats['runs'] / (stats['balls'] / 6)), 2) if stats['balls'] > 0 else 0.0
                 bowl_data.append({
-                    'Bowler': name,
-                    'Overs': overs_str,
-                    'Runs': stats['runs'],
-                    'Wickets': stats['wickets'],
-                    'Maidens': stats['maidens'],
-                    'Econ': econ,
+                    'Bowler': name, 'Overs': overs_str, 'Runs': stats['runs'],
+                    'Wickets': stats['wickets'], 'Maidens': stats['maidens'], 'Econ': econ,
                 })
             st.dataframe(bowl_data, use_container_width=True, hide_index=True)
         else:
@@ -909,11 +1016,11 @@ elif st.session_state.setup_step == 'playing':
 
     # ===== VIEWER MODE: auto-refresh and reload from cloud =====
     if st.session_state.get('viewer_mode') and st.session_state.get('match_code'):
-        # Auto-refresh every 10 seconds
+      
         st_autorefresh(interval=10000, key="viewer_refresh")
-        # Reload the latest match state from the cloud
+      
         load_match_from_cloud(st.session_state.match_code)
-        # Keep viewer_mode True (load doesn't set it)
+      
         st.session_state.viewer_mode = True
         st.info("👁️ **Viewing Mode** — auto-updates every 10 seconds. You cannot score in this mode.")
 
@@ -937,26 +1044,33 @@ elif st.session_state.setup_step == 'playing':
         st.markdown("### ☁️ Cloud Save")
         if supabase is None:
             st.caption("⚠️ Cloud storage not configured")
+        elif not st.session_state.get('match_code'):
+            if st.button("💾 Save & Get Code"):
+                st.session_state.match_code = generate_match_code()
+                ok, msg = save_match_to_cloud()
+                if ok:
+                    st.session_state.last_save_time = time.time()
+                    st.session_state.pending_save = False
+                    st.success(f"Saved! Code: {st.session_state.match_code}")
+                else:
+                    st.error(msg)
+                    st.session_state.match_code = None
+                st.rerun()
         else:
-            if not st.session_state.get('match_code'):
-                if st.button("💾 Save & Get Code"):
-                    st.session_state.match_code = generate_match_code()
-                    ok, msg = save_match_to_cloud()
-                    if ok:
-                        st.success(f"Saved! Code: {st.session_state.match_code}")
-                    else:
-                        st.error(msg)
-                        st.session_state.match_code = None
-                    st.rerun()
+            st.success(f"Match Code: **{st.session_state.match_code}**")
+            if st.session_state.get('pending_save'):
+                st.caption("🟡 Recent balls saved locally — syncing…")
             else:
-                st.success(f"Match Code: **{st.session_state.match_code}**")
-                st.caption("✅ Auto-saving after every action. Share this code so others can follow live.")
-                if st.button("💾 Force Save Now"):
-                    ok, msg = save_match_to_cloud()
-                    if ok:
-                        st.success("Saved!")
-                    else:
-                        st.error(msg)
+                st.caption("✅ All balls synced to the cloud.")
+            st.caption("Share this code so others can follow live.")
+            if st.button("💾 Force Save Now"):
+                ok, msg = save_match_to_cloud()
+                if ok:
+                    st.session_state.last_save_time = time.time()
+                    st.session_state.pending_save = False
+                    st.success("Saved!")
+                else:
+                    st.error(msg)
 
         st.markdown("---")
         if st.button("🔄 Reset Match"):
@@ -970,7 +1084,7 @@ elif st.session_state.setup_step == 'playing':
     s_stats = st.session_state.batsmen_stats.get(striker, {})
     ns_stats = st.session_state.batsmen_stats.get(non_striker, {})
 
-    # Build chase line for 2nd innings
+
     chase_html = ""
     if st.session_state.innings == 2 and st.session_state.target:
         runs_needed = max(0, st.session_state.target - st.session_state.runs)
@@ -1007,7 +1121,7 @@ elif st.session_state.setup_step == 'playing':
     """
     st.markdown(scoreboard_html, unsafe_allow_html=True)
 
-    # Render the over tracker separately (avoids markdown indentation issues)
+
     tracker_html = render_over_tracker()
     if tracker_html:
         st.markdown(tracker_html, unsafe_allow_html=True)
@@ -1018,14 +1132,14 @@ elif st.session_state.setup_step == 'playing':
     if st.session_state.awaiting_new_bowler:
         st.warning("⚠️ End of over! Select the next bowler.")
         bowling_players = get_bowling_team_players()
-        # Can't bowl consecutive overs
+      
         available_bowlers = [p for p in bowling_players if p != st.session_state.current_bowler]
         new_bowler = st.selectbox("Select next bowler:", available_bowlers, key="new_bowler_select")
         if st.button("✅ Confirm New Bowler", type="primary"):
             st.session_state.current_bowler = new_bowler
             init_bowler_stats(new_bowler)
             st.session_state.awaiting_new_bowler = False
-            auto_save()
+            auto_save(force=True)
             st.rerun()
     else:
         bowler = st.session_state.current_bowler
@@ -1045,7 +1159,7 @@ elif st.session_state.setup_step == 'playing':
     # ===== BATSMEN ON FIELD =====
     st.subheader("🏏 Batsmen on Field")
 
-    # Handle new batsman selection after wicket
+
     if st.session_state.awaiting_new_batsman:
         st.warning("⚠️ Wicket fallen! Select the next batsman.")
         batting_players = get_batting_team_players()
@@ -1062,12 +1176,12 @@ elif st.session_state.setup_step == 'playing':
                 st.session_state.striker = new_batsman
                 init_batsman_stats(new_batsman)
                 st.session_state.awaiting_new_batsman = False
-                auto_save()
+                auto_save(force=True)
                 st.rerun()
         else:
             st.error("No more batsmen available - innings should end")
     else:
-        # Display current batsmen
+      
         striker_stats = st.session_state.batsmen_stats.get(st.session_state.striker, {})
         non_striker_stats = st.session_state.batsmen_stats.get(st.session_state.non_striker, {})
 
@@ -1081,7 +1195,7 @@ elif st.session_state.setup_step == 'playing':
             SR: {get_strike_rate(striker_stats.get('runs', 0), striker_stats.get('balls', 0))}
             </div>
             """, unsafe_allow_html=True)
-
+      
         with col2:
             st.markdown(f"""
             <div class="non-striker-row">
@@ -1092,7 +1206,7 @@ elif st.session_state.setup_step == 'playing':
             </div>
             """, unsafe_allow_html=True)
 
-        # Swap strike button
+
         if st.button("🔄 Swap Strike"):
             st.session_state.striker, st.session_state.non_striker = (
                 st.session_state.non_striker, st.session_state.striker
@@ -1124,12 +1238,12 @@ elif st.session_state.setup_step == 'playing':
                     st.rerun()
 
         st.markdown("**Special:**")
+       
         col1, col2, col3, col4 = st.columns(4)
-
         with col1:
             if st.button("🎯 WICKET", type="primary"):
                 add_ball(0, is_wicket=True)
-                auto_save()
+                auto_save(force=True)
                 st.rerun()
         with col2:
             if st.button("Wide"):
@@ -1147,19 +1261,20 @@ elif st.session_state.setup_step == 'playing':
                 auto_save()
                 st.rerun()
 
-        # Manual controls
+
         st.markdown("---")
         col1, col2 = st.columns(2)
         with col1:
             if st.button("🏁 End Innings"):
                 end_innings()
-                auto_save()
+                auto_save(force=True)
                 st.rerun()
         with col2:
             if st.button("🛑 End Match"):
                 end_match()
-                auto_save()
+                auto_save(force=True)
                 st.rerun()
+
     # ===== BOWLING SCORECARD =====
     st.subheader("⚾ Bowling Figures")
     if st.session_state.bowlers_stats:
@@ -1168,12 +1283,8 @@ elif st.session_state.setup_step == 'playing':
             overs_str = f"{stats['balls'] // 6}.{stats['balls'] % 6}"
             econ = round((stats['runs'] / (stats['balls'] / 6)), 2) if stats['balls'] > 0 else 0.0
             bowling_data.append({
-                'Bowler': name,
-                'Overs': overs_str,
-                'Runs': stats['runs'],
-                'Wickets': stats['wickets'],
-                'Maidens': stats['maidens'],
-                'Econ': econ,
+                'Bowler': name, 'Overs': overs_str, 'Runs': stats['runs'],
+                'Wickets': stats['wickets'], 'Maidens': stats['maidens'], 'Econ': econ,
             })
         st.dataframe(bowling_data, use_container_width=True, hide_index=True)
     else:
@@ -1195,22 +1306,18 @@ elif st.session_state.setup_step == 'playing':
                 status = "batting"
             else:
                 status = "-"
-
+         
             sr = get_strike_rate(stats['runs'], stats['balls'])
             scorecard_data.append({
-                'Batsman': name,
-                'Status': status,
-                'Runs': stats['runs'],
-                'Balls': stats['balls'],
-                '4s': stats['fours'],
-                '6s': stats['sixes'],
-                'SR': sr,
+                'Batsman': name, 'Status': status, 'Runs': stats['runs'],
+                'Balls': stats['balls'], '4s': stats['fours'],
+                '6s': stats['sixes'], 'SR': sr,
             })
         st.dataframe(scorecard_data, use_container_width=True, hide_index=True)
     else:
         st.info("No batting stats yet")
 
-    # Ball-by-ball history
+
     if st.session_state.ball_history:
         with st.expander("📜 Recent Balls"):
             recent_balls = st.session_state.ball_history[-12:]
@@ -1222,7 +1329,7 @@ elif st.session_state.setup_step == 'playing':
                     entry += f" ({ball['extra']})"
                 st.text(entry)
 
-    # Show first innings summary if in second innings
+
     if st.session_state.innings == 2 and st.session_state.team1_score:
         with st.expander("📊 First Innings Summary"):
             t1 = st.session_state.team1_score
@@ -1232,11 +1339,8 @@ elif st.session_state.setup_step == 'playing':
                 for name, stats in t1['batsmen_stats'].items():
                     status = "out" if stats['out'] else "not out"
                     data.append({
-                        'Batsman': name,
-                        'Status': status,
-                        'Runs': stats['runs'],
-                        'Balls': stats['balls'],
-                        '4s': stats['fours'],
+                        'Batsman': name, 'Status': status, 'Runs': stats['runs'],
+                        'Balls': stats['balls'], '4s': stats['fours'],
                         '6s': stats['sixes'],
                         'SR': get_strike_rate(stats['runs'], stats['balls']),
                     })
