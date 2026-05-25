@@ -262,90 +262,95 @@ def _top_bowler(bowlers_stats):
 def generate_scorecard_image(t1, t2, result_text, total_overs):
     """Build a shareable PNG scorecard. Returns PNG bytes.
 
-    Layout is built as a vertically-centered stack so short matches fill
-    the canvas instead of floating in dead space."""
+    Big bold scores, content auto-fit so nothing overflows, vertically
+    centered so short matches fill the canvas."""
     W, H = 1080, 1080
     BG = (15, 32, 39)
     CARD = (30, 58, 68)
     ACCENT = (46, 158, 79)
     GOLD = (255, 213, 79)
     WHITE = (255, 255, 255)
-    MUTED = (165, 185, 190)
+    MUTED = (178, 196, 201)
 
     img = Image.new("RGB", (W, H), BG)
     d = ImageDraw.Draw(img)
 
-    f_title = _load_font(64, bold=True)
-    f_team = _load_font(62, bold=True)
-    f_score = _load_font(104, bold=True)
-    f_overs = _load_font(38)
-    f_label = _load_font(30)
-    f_stat = _load_font(40, bold=True)
-    f_result = _load_font(54, bold=True)
-    f_foot = _load_font(28)
+    f_title = _load_font(72, bold=True)
+    f_score = _load_font(148, bold=True)
+    f_overs = _load_font(42)
+    f_label = _load_font(30, bold=True)
+    f_foot = _load_font(30)
 
-    MARGIN = 70
-    inner = W - 2 * MARGIN
+    M = 60
+
+    def _fit(text, base, max_w, bold=True, floor=18):
+        sz = base
+        while sz > floor:
+            f = _load_font(sz, bold=bold)
+            bb = d.textbbox((0, 0), text, font=f)
+            if bb[2] - bb[0] <= max_w:
+                return f
+            sz -= 2
+        return _load_font(floor, bold=bold)
 
     def center(text, font, y, fill=WHITE):
-        bbox = d.textbbox((0, 0), text, font=font)
-        w = bbox[2] - bbox[0]
+        bb = d.textbbox((0, 0), text, font=font)
+        w = bb[2] - bb[0]
         d.text(((W - w) / 2, y), text, font=font, fill=fill)
-        return bbox[3] - bbox[1]
 
-    CARD_H = 290
-    GAP = 40
-    BANNER_H = 150
 
-    # Total height of the content block, to vertically center it
-    title_h = 80
-    block_h = title_h + 50 + CARD_H + GAP + CARD_H + 60 + BANNER_H
-    start_y = (H - block_h) // 2
+    CARD_H = 330
+    GAP = 46
+    BANNER_H = 160
+    title_h = 88
+    block = title_h + 44 + CARD_H + GAP + CARD_H + 64 + BANNER_H
+    y = (H - block) // 2
 
-    y = start_y
+
     center("MATCH RESULT", f_title, y, ACCENT)
-    y += title_h + 50
+    y += title_h + 44
 
-    def innings_card(score, top):
-        d.rounded_rectangle([MARGIN, top, W - MARGIN, top + CARD_H],
-                            radius=28, fill=CARD)
-        pad = 50
-        d.text((MARGIN + pad, top + 34), score['team'], font=f_team, fill=WHITE)
-        d.text((MARGIN + pad, top + 120),
-               f"{score['runs']}/{score['wickets']}", font=f_score, fill=GOLD)
-        d.text((MARGIN + pad, top + 232),
-               f"{score['overs']} / {total_overs} overs", font=f_overs, fill=MUTED)
+    pad = 56
+    xr = M + 560
+    team_max_w = xr - (M + pad) - 20
+    stat_max_w = (W - M) - xr - 30
 
-        x_right = MARGIN + 520
+    def card(score, top):
+        d.rounded_rectangle([M, top, W - M, top + CARD_H], radius=30, fill=CARD)
+        d.text((M + pad, top + 36), score['team'],
+               font=_fit(score['team'], 72, team_max_w), fill=WHITE)
+        d.text((M + pad, top + 128), f"{score['runs']}/{score['wickets']}",
+               font=f_score, fill=GOLD)
+        d.text((M + pad, top + 288), f"{score['overs']} / {total_overs} overs",
+               font=f_overs, fill=MUTED)
         tb = _top_batter(score.get('batsmen_stats', {}))
         tw = _top_bowler(score.get('bowlers_stats', {}))
         
         if tb:
-            name, s = tb
-            d.text((x_right, top + 40), "TOP SCORER", font=f_label, fill=MUTED)
-            d.text((x_right, top + 78),
-                   f"{name}  {s.get('runs', 0)} ({s.get('balls', 0)})",
-                   font=f_stat, fill=WHITE)
+            n, s = tb
+            txt = f"{n}  {s.get('runs', 0)} ({s.get('balls', 0)})"
+            d.text((xr, top + 50), "TOP SCORER", font=f_label, fill=MUTED)
+            d.text((xr, top + 90), txt, font=_fit(txt, 46, stat_max_w), fill=WHITE)
         if tw:
-            name, s = tw
-            balls = s.get('balls', 0)
-            ov = f"{balls // 6}.{balls % 6}"
-            d.text((x_right, top + 158), "BEST BOWLER", font=f_label, fill=MUTED)
-            d.text((x_right, top + 196),
-                   f"{name}  {s.get('wickets', 0)}/{s.get('runs', 0)} ({ov})",
-                   font=f_stat, fill=WHITE)
+            n, s = tw
+            bl = s.get('balls', 0)
+            ov = f"{bl // 6}.{bl % 6}"
+            txt = f"{n}  {s.get('wickets', 0)}/{s.get('runs', 0)} ({ov})"
+            d.text((xr, top + 186), "BEST BOWLER", font=f_label, fill=MUTED)
+            d.text((xr, top + 226), txt, font=_fit(txt, 46, stat_max_w), fill=WHITE)
 
-    innings_card(t1, y)
+    card(t1, y)
     y += CARD_H + GAP
-    innings_card(t2, y)
-    y += CARD_H + 60
+    card(t2, y)
+    y += CARD_H + 64
 
-    d.rounded_rectangle([MARGIN, y, W - MARGIN, y + BANNER_H], radius=28, fill=ACCENT)
-    bbox = d.textbbox((0, 0), result_text, font=f_result)
-    th = bbox[3] - bbox[1]
-    center(result_text, f_result, y + (BANNER_H - th) // 2 - bbox[1], WHITE)
+    d.rounded_rectangle([M, y, W - M, y + BANNER_H], radius=30, fill=ACCENT)
+    rf = _fit(result_text, 62, (W - 2 * M) - 60)
+    bb = d.textbbox((0, 0), result_text, font=rf)
+    th = bb[3] - bb[1]
+    center(result_text, rf, y + (BANNER_H - th) // 2 - bb[1], WHITE)
 
-    center("Free Cricket Score App  -  built by Nikhil", f_foot, H - 60, MUTED)
+    center("Free Cricket Score App  -  built by Nikhil", f_foot, H - 46, MUTED)
 
     buf = io.BytesIO()
     img.save(buf, format="PNG")
